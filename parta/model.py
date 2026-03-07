@@ -4,6 +4,18 @@ import torch
 import torch.nn as nn
 from typing import Any, Dict, List
 
+class transformer_block(nn.Module):
+    def __init__(self, config: Dict[str, Any],layer_idx: int):
+        self.config = config
+        self.layer_idx = layer_idx
+        super().__init__()
+        self.layer_norm1 = nn.LayerNorm(config['d_model'],elementwise_affine=True)
+        self.layer_norm2 = nn.LayerNorm(config['d_model'],elementwise_affine=True)
+        self.up_proj = nn.Linear(config['d_model'], 4*config['d_model'])
+        self.down_proj = nn.Linear(4*config['d_model'], config['d_model'])
+        self.gelu = nn.GELU()
+        
+
 class LanguageModel(nn.Module):
     """
     This is a stub class for the assignment.
@@ -35,6 +47,7 @@ class LanguageModel(nn.Module):
         Parameters:
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
+        
         raise NotImplementedError("Implement set_weights as described in assignment document")
     
     def layer_norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -43,13 +56,16 @@ class LanguageModel(nn.Module):
         
     def transformer_block(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         org_x = x
-        x = self.layer_norm(x)
+        x = self.layer_norm1(x)
         x = self.multi_head_attention(x, attention_mask)
         x = x + org_x
         org_x = x
-        x = self.layer_norm(x)
-        x = x 
-         
+        x = self.layer_norm2(x)
+        x = self.up_proj(x)
+        x = self.gelu(x)
+        x = self.down_proj(x)
+        x = x + org_x
+        return x
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """
