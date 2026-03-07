@@ -28,6 +28,7 @@ class LanguageModel(nn.Module):
         """
         self.config = config
         super().__init__()
+        self.input_embeddings = nn.Embedding(num_embeddings=self.config['vocab_size'], embedding_dim=self.config['d_model'])
     
     def positional_encoding(self, input_ids: torch.Tensor) -> torch.Tensor:
         pe = torch.zeros(input_ids.size(1), self.config['d_model'])
@@ -47,8 +48,24 @@ class LanguageModel(nn.Module):
         Parameters:
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
+        self.input_embeddings.weight.data = weights['W_Vocab']
+        self.lm_head.weight.data = weights["W_devocab"].T
         
-        raise NotImplementedError("Implement set_weights as described in assignment document")
+        self.layer_norm_final.weight.data = weights['gamma_final']
+        self.layer_norm_final.bias.data = weights['beta_final']
+        
+        for i,block in enumerate(self.transformer_blocks):
+            layer = i+1
+            block.layer_norm1.weight.data = weights[f'gamma_{layer}_1']
+            block.layer_norm1.bias.data = weights[f'beta_{layer}_1']
+            block.layer_norm2.weight.data = weights[f'gamma_{layer}_2']
+            block.layer_norm2.bias.data = weights[f'beta_{layer}_2']
+            
+            block.up_proj.weight.data = weights[f'W_{layer}_up']
+            block.up_proj.bias.data = weights[f'b_{layer}_up']
+            block.down_proj.weight.data = weights[f'W_{layer}_down']
+            block.down_proj.bias.data = weights[f'b_{layer}_down']
+        
     
     def layer_norm(self, x: torch.Tensor) -> torch.Tensor:
         
@@ -80,9 +97,8 @@ class LanguageModel(nn.Module):
             Logits are the raw, unnormalized scores output by the model, which can be converted to probabilities using a softmax function.
         """
         #1 input encoding
-        input_embeddings = nn.Embedding(num_embeddings=self.config['vocab_size'], embedding_dim=self.config['d_model'])(input_ids)
         #2 positional encoding
-        encodings = input_embeddings + self.positional_encoding(input_ids)
+        encodings = self.input_embeddings(input_ids) + self.positional_encoding(input_ids)
         #3 transformer blocks
         for _ in range(self.config['num_layers']):
             encodings = self.transformer_block(encodings, attention_mask)
