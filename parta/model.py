@@ -1,7 +1,8 @@
+import math
+
 import torch
 import torch.nn as nn
 from typing import Any, Dict, List
-
 
 class LanguageModel(nn.Module):
     """
@@ -15,6 +16,15 @@ class LanguageModel(nn.Module):
         """
         self.config = config
         super().__init__()
+    
+    def positional_encoding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        pe = torch.zeros(input_ids.size(1), self.config['d_model'])
+        for pos in range(input_ids.size(1)):
+            for i in range(0, self.config['d_model'], 2):
+                pe[pos, 2*i] = math.sin(pos / (10000 ** (2*i / self.config['d_model'])))
+                if i + 1 < self.config['d_model']:
+                    pe[pos, 2*i + 1] = math.cos(pos / (10000 ** (2*(i) / self.config['d_model'])))
+        return pe
 
     def set_weights(self, weights: Dict[str, Any]):
         """
@@ -26,6 +36,20 @@ class LanguageModel(nn.Module):
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
         raise NotImplementedError("Implement set_weights as described in assignment document")
+    
+    def layer_norm(self, x: torch.Tensor) -> torch.Tensor:
+        
+    def multi_head_attention(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        
+    def transformer_block(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        org_x = x
+        x = self.layer_norm(x)
+        x = self.multi_head_attention(x, attention_mask)
+        x = x + org_x
+        org_x = x
+        x = self.layer_norm(x)
+        x = x 
+         
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -39,8 +63,20 @@ class LanguageModel(nn.Module):
             - A tensor of shape (batch_size, sequence_len, vocab_size) containing the logits for each token in the vocabulary.
             Logits are the raw, unnormalized scores output by the model, which can be converted to probabilities using a softmax function.
         """
-        raise NotImplementedError("Implement forward as described in assignment document")
-
+        #1 input encoding
+        input_embeddings = nn.Embedding(num_embeddings=self.config['vocab_size'], embedding_dim=self.config['d_model'])(input_ids)
+        #2 positional encoding
+        encodings = input_embeddings + self.positional_encoding(input_ids)
+        #3 transformer blocks
+        for _ in range(self.config['num_layers']):
+            encodings = self.transformer_block(encodings, attention_mask)
+        #4 final norm
+        encodings = self.layer_norm(encodings)
+        #5 projection to vocab size
+        logits = nn.Linear(encodings)(self.config['d_model'], self.config['vocab_size'])
+        #6 softmax
+        prob = nn.Softmax(logits,axis=-1)
+        return prob
 
 
 def load_model(config: Dict[str, Any], weights: Dict[str, Any]):
@@ -49,7 +85,7 @@ def load_model(config: Dict[str, Any], weights: Dict[str, Any]):
     However, DO NOT CHANGE THE SIGNATURE OF THIS FUNCTION.
     Ensure that the function inputs config and weights and outputs a nn.Module derived object.
     """
-
+    
     model = LanguageModel(config)
     model.set_weights(weights)
 
