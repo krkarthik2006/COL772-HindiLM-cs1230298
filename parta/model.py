@@ -16,10 +16,11 @@ class multi_head_attention(nn.Module):
         self.W_v = nn.ModuleList([nn.Linear(self.d_model, self.d_head,bias = False) for _ in range(self.n_heads)])
         self.W_o = nn.Linear(self.n_heads*self.d_model , self.d_model,bias = False)
 
-    def mha_forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         head_outputs = []
         batch_size, seq_len, _ = x.size()
-        for head_idx in range(self.n_heads):
+        for idx in range(self.n_heads):
+            head_idx = idx+1
             query_matrix = self.W_q[head_idx](x)
             key_matrix = self.W_k[head_idx](x)
             value_matrix = self.W_v[head_idx](x)
@@ -36,7 +37,7 @@ class multi_head_attention(nn.Module):
             pad_mask = attention_mask.unsqueeze(1) == 0
             S = S.masked_fill(pad_mask, float('-inf'))
             
-            Attention = nn.Softmax(S, dim=-1)
+            Attention = nn.Softmax(dim=-1)(S)
             head = Attention @ value_matrix
             head_outputs.append(head)
         
@@ -56,14 +57,23 @@ class transformer_block(nn.Module):
         self.down_proj = nn.Linear(4*config['d_model'], config['d_model'])
         self.gelu = nn.GELU()
         self.multi_head_attention = multi_head_attention(config)
+    
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        org_x = x
+        x = self.layer_norm1(x)
+        x = self.multi_head_attention(x, attention_mask)
+        x = x + org_x
+        org_x = x
+        x = self.layer_norm2(x)
+        x = self.up_proj(x)
+        x = self.gelu(x)
+        x = self.down_proj(x)
+        x = x + org_x
+        return x
         
 
 class LanguageModel(nn.Module):
-    """
-    This is a stub class for the assignment.
-    Feel free to change the function signatures (including that of __init__, forward) as you need them.
-    """
-
+    
     def __init__(self, config: Dict[str, Any]):
         """
         Build the LanguageModel based on the config.
@@ -80,15 +90,16 @@ class LanguageModel(nn.Module):
     def positional_encoding(self, input_ids: torch.Tensor) -> torch.Tensor:
         seq_len = input_ids.size(1)
         d_model = self.config['d_model']
+        device = input_ids.device
 
-        pos = torch.arange(seq_len).unsqueeze(1)
-        i = torch.arange(0, d_model, 2)
+        pos = torch.arange(seq_len,device = device).unsqueeze(1)
+        i = torch.arange(0, d_model, 2, device=device)
 
         div_term = 10000 ** (2 * i / d_model)
 
         angles = pos / div_term
 
-        pe = torch.zeros(seq_len, d_model)
+        pe = torch.zeros(seq_len, d_model, device=device)
         pe[:, 0::2] = torch.sin(angles)
         pe[:, 1::2] = torch.cos(angles)
 
@@ -104,7 +115,7 @@ class LanguageModel(nn.Module):
         Parameters:
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
-        self.input_embeddings.weight.data = weights['W_Vocab']
+        self.input_embeddings.weight.data = weights['W_vocab']
         self.lm_head.weight.data = weights["W_devocab"].T
         
         self.layer_norm_final.weight.data = weights['gamma_final']
@@ -122,25 +133,13 @@ class LanguageModel(nn.Module):
             block.down_proj.weight.data = weights[f'W_{layer}_down'].T
             block.down_proj.bias.data = weights[f'b_{layer}_down']
             for head in range(self.config['n_heads']):
-                block.multi_head_attention.W_q.weight.data = weights[f'W_{layer}_Q_{head}']
-                block.multi_head_attention.W_v.weight.data = weights[f'W_{layer}_V_{head}']
-                block.multi_head_attention.W_k.weight.data = weights[f'W_{layer}_K_{head}']
+                head_idx = head+1
+                block.multi_head_attention.W_q[head_idx].weight.data = weights[f'W_{layer}_Q_{head}']
+                block.multi_head_attention.W_v[head_idx].weight.data = weights[f'W_{layer}_V_{head}']
+                block.multi_head_attention.W_k[head_idx].weight.data = weights[f'W_{layer}_K_{head}']
             block.multi_head_attention.W_o.weight.data = weights[f'W_{layer}_O']
         
-            
-    def transformer_block(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        org_x = x
-        x = self.layer_norm1(x)
-        for 
-        x = self.multi_head_attention.mha_forward(x, attention_mask)
-        x = x + org_x
-        org_x = x
-        x = self.layer_norm2(x)
-        x = self.up_proj(x)
-        x = self.gelu(x)
-        x = self.down_proj(x)
-        x = x + org_x
-        return x
+
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -158,14 +157,14 @@ class LanguageModel(nn.Module):
         #2 positional encoding
         encodings = self.input_embeddings(input_ids) + self.positional_encoding(input_ids)
         #3 transformer blocks
-        for _ in range(self.config['num_layers']):
-            encodings = self.transformer_block(encodings, attention_mask)
+        for block in self.transformer_blocks:
+            encodings = block(encodings, attention_mask)
         #4 final norm
         encodings = self.layer_norm_final(encodings)
         #5 projection to vocab size
-        logits = encodings @ self.lm_head.weight.T
+        logits = self.lm_head(encodings)
         #6 softmax
-        self.probabilites = nn.Softmax(logits,axis=-1)
+        # self.probabilites = nn.Softmax(dim=-1)(logits)
         
         #unnorm prob ret
         return logits
@@ -186,9 +185,12 @@ def load_model(config: Dict[str, Any], weights: Dict[str, Any]):
 
 def collate_fn(batch: Dict[str, List[torch.tensor]]) -> Dict[str, torch.Tensor]:
     """
-    This is a sample code. Replace with your own.
-    However, DO NOT CHANGE THE SIGNATURE OF THIS FUNCTION.
-    Ensure that the function takes in a batch of data and outputs a dictionary of tensors ready to be fed into the model.
+    the function takes in a batch of data and outputs a dictionary of tensors ready to be fed into the model.
     """
-    PAD_ID = 0  # Assume 0 is the padding token ID
-    raise NotImplementedError("Implement collate_fn as described in assignment document")
+    PAD_ID = 0  
+    padded_input_ids = pad_sequence(batch['input_ids'], batch_first=True, padding_value=PAD_ID)
+    padded_attention_mask = pad_sequence(batch['attention_mask'], batch_first=True, padding_value=PAD_ID)
+    return {'input_ids': padded_input_ids, 'attention_mask': padded_attention_mask}
+    
+    
+    
