@@ -1,0 +1,9 @@
+{
+    "d_model": 256,
+    "n_heads": 8,
+    "d_head": 32,
+    "n_layers": 6,
+    "vocab_size": 20000,
+    "mode": "tanh-clipped",
+    "tau": 1.5
+}

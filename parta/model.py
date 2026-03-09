@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from typing import Any, Dict, List
+from torch.nn.utils.rnn import pad_sequence
 
 class multi_head_attention(nn.Module):
     def __init__(self, config: Dict[str, Any]):
@@ -11,46 +12,44 @@ class multi_head_attention(nn.Module):
         self.n_heads = config['n_heads']
         self.d_head = self.d_model // self.n_heads
         
-        self.W_q = nn.ModuleList([nn.Linear(self.d_model, self.d_head,bias = False) for _ in range(self.n_heads)])
-        self.W_k = nn.ModuleList([nn.Linear(self.d_model, self.d_head,bias = False) for _ in range(self.n_heads)])
-        self.W_v = nn.ModuleList([nn.Linear(self.d_model, self.d_head,bias = False) for _ in range(self.n_heads)])
-        self.W_o = nn.Linear(self.n_heads*self.d_model , self.d_model,bias = False)
+        self.W_q = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.W_k = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.W_v = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.W_o = nn.Linear(self.d_model , self.d_model,bias=False)
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         head_outputs = []
-        batch_size, seq_len, _ = x.size()
-        for idx in range(self.n_heads):
-            head_idx = idx+1
-            query_matrix = self.W_q[head_idx](x)
-            key_matrix = self.W_k[head_idx](x)
-            value_matrix = self.W_v[head_idx](x)
-
-            S = query_matrix @ key_matrix.transpose(-2, -1) / math.sqrt(self.d_head)
-            if (self.config['mode']== "tanh-clipped"):
-                S= self.config["tau"]*torch.tanh(S)
-            
-            #m wiht upper triangluar matrix as -inf rest 0 
-            M = torch.triu(torch.full((seq_len, seq_len), float('-inf'), device=x.device), diagonal=1)
-            S = S+M
-            
-            #padding masking 
-            pad_mask = attention_mask.unsqueeze(1) == 0
-            S = S.masked_fill(pad_mask, float('-inf'))
-            
-            Attention = nn.Softmax(dim=-1)(S)
-            head = Attention @ value_matrix
-            head_outputs.append(head)
+        B, seq_len, _ = x.size()
         
-        final_concat_output = torch.cat(head_outputs, dim=-1)
-        output = self.W_o(final_concat_output)
+        query_matrix = self.W_q(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        key_matrix = self.W_k(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        value_matrix = self.W_v(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+
+        S = torch.matmul(query_matrix , key_matrix.transpose(-2, -1))/ math.sqrt(self.d_head)
+        if (self.config['mode']== "tanh-clipped"):
+            S= self.config["tau"]*torch.tanh(S)
+        
+        #m wiht upper triangluar matrix as -inf rest 0 
+        M = torch.triu(torch.full((seq_len, seq_len), float('-inf'), device=x.device), diagonal=1)
+        S = S+ M.unsqueeze(0).unsqueeze(0)
+        
+        #padding masking 
+        pad_mask = (attention_mask == 0).view(B, 1, 1, seq_len)
+        S = S.masked_fill(pad_mask, float('-inf'))
+        
+        Attention = nn.Softmax(dim=-1)(S)
+        head_outputs = torch.matmul(Attention, value_matrix)
+        
+        head_outputs = head_outputs.transpose(1, 2).contiguous().view(B, seq_len, self.d_model)
+        output = self.W_o(head_outputs)
         return output
         
 
 class transformer_block(nn.Module):
     def __init__(self, config: Dict[str, Any],layer_idx: int):
+        super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        super().__init__()
         self.layer_norm1 = nn.LayerNorm(config['d_model'],elementwise_affine=True)
         self.layer_norm2 = nn.LayerNorm(config['d_model'],elementwise_affine=True)
         self.up_proj = nn.Linear(config['d_model'], 4*config['d_model'])
@@ -95,7 +94,7 @@ class LanguageModel(nn.Module):
         pos = torch.arange(seq_len,device = device).unsqueeze(1)
         i = torch.arange(0, d_model, 2, device=device)
 
-        div_term = 10000 ** (2 * i / d_model)
+        div_term = 10000 ** (i / d_model)
 
         angles = pos / div_term
 
@@ -115,7 +114,7 @@ class LanguageModel(nn.Module):
         Parameters:
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
-        self.input_embeddings.weight.data = weights['W_vocab']
+        self.input_embeddings.weight.data = weights['W_vocab'].T
         self.lm_head.weight.data = weights["W_devocab"].T
         
         self.layer_norm_final.weight.data = weights['gamma_final']
@@ -132,12 +131,21 @@ class LanguageModel(nn.Module):
             block.up_proj.bias.data = weights[f'b_{layer}_up']
             block.down_proj.weight.data = weights[f'W_{layer}_down'].T
             block.down_proj.bias.data = weights[f'b_{layer}_down']
+            
+            W_q_list = []
+            W_v_list = []
+            W_k_list = []
             for head in range(self.config['n_heads']):
                 head_idx = head+1
-                block.multi_head_attention.W_q[head_idx].weight.data = weights[f'W_{layer}_Q_{head}']
-                block.multi_head_attention.W_v[head_idx].weight.data = weights[f'W_{layer}_V_{head}']
-                block.multi_head_attention.W_k[head_idx].weight.data = weights[f'W_{layer}_K_{head}']
-            block.multi_head_attention.W_o.weight.data = weights[f'W_{layer}_O']
+                W_q_list.append(weights[f'W_{layer}_Q_{head_idx}'])
+                W_k_list.append(weights[f'W_{layer}_K_{head_idx}'])
+                W_v_list.append(weights[f'W_{layer}_V_{head_idx}'])
+            
+            block.multi_head_attention.W_q.weight.data = torch.cat(W_q_list, dim=0).T
+            block.multi_head_attention.W_k.weight.data = torch.cat(W_k_list, dim=0).T
+            block.multi_head_attention.W_v.weight.data = torch.cat(W_v_list, dim=0).T
+
+            block.multi_head_attention.W_o.weight.data = weights[f'W_{layer}_O'].T
         
 
 
@@ -183,13 +191,13 @@ def load_model(config: Dict[str, Any], weights: Dict[str, Any]):
     return model
 
 
-def collate_fn(batch: Dict[str, List[torch.tensor]]) -> Dict[str, torch.Tensor]:
+def collate_fn(batch: Dict[str, List[torch.Tensor]]) -> Dict[str, torch.Tensor]:
     """
     the function takes in a batch of data and outputs a dictionary of tensors ready to be fed into the model.
     """
     PAD_ID = 0  
-    padded_input_ids = pad_sequence(batch['input_ids'], batch_first=True, padding_value=PAD_ID)
-    padded_attention_mask = pad_sequence(batch['attention_mask'], batch_first=True, padding_value=PAD_ID)
+    padded_input_ids = pad_sequence(batch['input_ids'], batch_first=True, padding_value=PAD_ID).long()
+    padded_attention_mask = pad_sequence(batch['attention_mask'], batch_first=True, padding_value=PAD_ID).long()
     return {'input_ids': padded_input_ids, 'attention_mask': padded_attention_mask}
     
     
