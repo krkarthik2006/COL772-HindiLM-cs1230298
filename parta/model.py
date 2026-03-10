@@ -131,7 +131,7 @@ class LanguageModel(nn.Module):
                 block.layer_norm2.bias.copy_(weights[f'beta_{layer}_2'])
 
                 block.up_proj.weight.copy_(weights[f'W_{layer}_up'].T)
-                print("up_proj weight shape:", block.up_proj.weight.data.shape)
+                
                 block.up_proj.bias.copy_(weights[f'b_{layer}_up'])
                 block.down_proj.weight.copy_(weights[f'W_{layer}_down'].T)
                 block.down_proj.bias.copy_(weights[f'b_{layer}_down'])
@@ -146,7 +146,6 @@ class LanguageModel(nn.Module):
                 W_v_list.append(weights[f'W_{layer}_V_{head_idx}'])
             with torch.no_grad():
                 block.multi_head_attention.W_q.weight.copy_(torch.cat(W_q_list, dim=0).T)
-                #print(block.multi_head_attention.W_q.weight.data.shape)
                 block.multi_head_attention.W_k.weight.copy_(torch.cat(W_k_list, dim=0).T)
                 block.multi_head_attention.W_v.weight.copy_(torch.cat(W_v_list, dim=0).T)
 
