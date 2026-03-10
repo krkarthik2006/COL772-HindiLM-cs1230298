@@ -20,8 +20,9 @@ class multi_head_attention(nn.Module):
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         head_outputs = []
         B, seq_len, _ = x.size()
-        
+        #print(x.shape)
         query_matrix = self.W_q(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        #print(query_matrix.shape)
         key_matrix = self.W_k(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
         value_matrix = self.W_v(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
 
@@ -114,24 +115,27 @@ class LanguageModel(nn.Module):
         Parameters:
             - weights: A dictionary containing the model's weights. The structure of this dictionary will depend on how you design your model.
         """
-        self.input_embeddings.weight.data = weights['W_vocab'].T
-        self.lm_head.weight.data = weights["W_devocab"].T
-        
-        self.layer_norm_final.weight.data = weights['gamma_final']
-        self.layer_norm_final.bias.data = weights['beta_final']
+        with torch.no_grad():
+            self.input_embeddings.weight.copy_(weights['W_vocab'].T)
+            self.lm_head.weight.copy_(weights["W_devocab"].T)
+            
+            self.layer_norm_final.weight.copy_(weights['gamma_final'])
+            self.layer_norm_final.bias.copy_(weights['beta_final'])
         
         for i,block in enumerate(self.transformer_blocks):
             layer = i+1
-            block.layer_norm1.weight.data = weights[f'gamma_{layer}_1']
-            block.layer_norm1.bias.data = weights[f'beta_{layer}_1']
-            block.layer_norm2.weight.data = weights[f'gamma_{layer}_2']
-            block.layer_norm2.bias.data = weights[f'beta_{layer}_2']
-            
-            block.up_proj.weight.data = weights[f'W_{layer}_up'].T
-            block.up_proj.bias.data = weights[f'b_{layer}_up']
-            block.down_proj.weight.data = weights[f'W_{layer}_down'].T
-            block.down_proj.bias.data = weights[f'b_{layer}_down']
-            
+            with torch.no_grad():
+                block.layer_norm1.weight.copy_(weights[f'gamma_{layer}_1'])
+                block.layer_norm1.bias.copy_(weights[f'beta_{layer}_1'])
+                block.layer_norm2.weight.copy_(weights[f'gamma_{layer}_2'])
+                block.layer_norm2.bias.copy_(weights[f'beta_{layer}_2'])
+
+                block.up_proj.weight.copy_(weights[f'W_{layer}_up'].T)
+                print("up_proj weight shape:", block.up_proj.weight.data.shape)
+                block.up_proj.bias.copy_(weights[f'b_{layer}_up'])
+                block.down_proj.weight.copy_(weights[f'W_{layer}_down'].T)
+                block.down_proj.bias.copy_(weights[f'b_{layer}_down'])
+
             W_q_list = []
             W_v_list = []
             W_k_list = []
@@ -140,12 +144,13 @@ class LanguageModel(nn.Module):
                 W_q_list.append(weights[f'W_{layer}_Q_{head_idx}'])
                 W_k_list.append(weights[f'W_{layer}_K_{head_idx}'])
                 W_v_list.append(weights[f'W_{layer}_V_{head_idx}'])
-            
-            block.multi_head_attention.W_q.weight.data = torch.cat(W_q_list, dim=0).T
-            block.multi_head_attention.W_k.weight.data = torch.cat(W_k_list, dim=0).T
-            block.multi_head_attention.W_v.weight.data = torch.cat(W_v_list, dim=0).T
+            with torch.no_grad():
+                block.multi_head_attention.W_q.weight.copy_(torch.cat(W_q_list, dim=0).T)
+                #print(block.multi_head_attention.W_q.weight.data.shape)
+                block.multi_head_attention.W_k.weight.copy_(torch.cat(W_k_list, dim=0).T)
+                block.multi_head_attention.W_v.weight.copy_(torch.cat(W_v_list, dim=0).T)
 
-            block.multi_head_attention.W_o.weight.data = weights[f'W_{layer}_O'].T
+                block.multi_head_attention.W_o.weight.copy_(weights[f'W_{layer}_O'].T)
         
 
 
@@ -199,6 +204,3 @@ def collate_fn(batch: Dict[str, List[torch.Tensor]]) -> Dict[str, torch.Tensor]:
     padded_input_ids = pad_sequence(batch['input_ids'], batch_first=True, padding_value=PAD_ID).long()
     padded_attention_mask = pad_sequence(batch['attention_mask'], batch_first=True, padding_value=PAD_ID).long()
     return {'input_ids': padded_input_ids, 'attention_mask': padded_attention_mask}
-    
-    
-    
