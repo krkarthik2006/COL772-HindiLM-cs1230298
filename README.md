@@ -99,3 +99,13 @@ All queries and discussion related to the assignment must be done on Piazza. Any
 ----
 
 Good luck with the assignment! We hope you find this a rewarding learning experience.
+
+
+# Changlog
+
+**How to run `evaluate_tokenizer.py` file?**
+
+Run the following command form the ROOT of the package. Do not run from `partb/` directory.
+```
+python -m partb.evaluate_tokenizer --input_corpus_path ./data/tokenizer_corpus.txt --tokenizer_path <path to your tokenizer>
+```
