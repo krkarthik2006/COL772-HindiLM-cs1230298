@@ -1,3 +1,5 @@
+import json
+import re
 class BPETokenizer:
     def __init__(self, vocab_size, special_tokens=None):
         self.special_tokens = ['<PAD>','<UNK>','<SOS>','<EOS>'] if special_tokens is None else special_tokens
@@ -12,11 +14,13 @@ class BPETokenizer:
         #1 create vocab from corpus
         vocab_word_freq = {}
         for text in corpus:
-            new_text = text.replace(' ', ' \u0120')
-            for word in new_text.split():
-                if word not in vocab_word_freq:
-                    vocab_word_freq[word] = 0
-                vocab_word_freq[word] += 1
+            tokens = re.findall(r'\w+|[^\w\s]|\s', text)
+            for word_punc in tokens:
+                if word_punc == ' ':
+                    word_punc = '\u0120'
+                if word_punc not in vocab_word_freq:
+                    vocab_word_freq[word_punc] = 0
+                vocab_word_freq[word_punc] += 1
         #2 initialize token_to_id and id_to_token with special tokens
         index =0
         for idx, token in enumerate(self.special_tokens):
@@ -86,19 +90,84 @@ class BPETokenizer:
         
     
     def encode(self, text):
-        raise NotImplementedError("Encoding method not implemented yet.")
-
+        words = re.findall(r'\w+|[^\w\s]|\s', text)
+        token_ids = []
+        word_to_word_split = {}
+        for word in words:
+            char_list = []
+            for char in word:
+                if char == ' ':
+                    char = '\u0120'
+                if char not in self.token_to_id:
+                    char = '<UNK>'
+                char_list.append(char)
+            
+            while(True):
+                available_pairs = {}
+                for i in range(len(char_list)-1):
+                    pair = (char_list[i], char_list[i+1])
+                    pair_str = ''.join(pair)
+                    if pair in self.merged_tokens:
+                        available_pairs[self.merged_tokens_rank[pair_str]] = pair
+                if available_pairs!={}:
+                    best_pair = available_pairs[min(available_pairs.keys())]
+                    new_char_list = []
+                    i = 0
+                    while i < len(char_list):
+                        if i < len(char_list) - 1:
+                            pair = (char_list[i], char_list[i+1])
+                            if pair == best_pair:
+                                new_char_list.append(''.join(pair))
+                                i += 2
+                            else:
+                                new_char_list.append(char_list[i])
+                                i += 1
+                        else:
+                            new_char_list.append(char_list[i])
+                            i += 1
+                    char_list = new_char_list
+                else:
+                    break
+            word_to_word_split[word] = char_list
+            for token in char_list:
+                if token not in self.token_to_id:
+                    token_id = self.token_to_id['<UNK>']
+                else:
+                    token_id = self.token_to_id[token]
+                token_ids.append(token_id)
+        return token_ids
+                    
     def decode(self, token_ids):
-        raise NotImplementedError("Decoding method not implemented yet.")
+        tokens = [self.id_to_token[token_id] for token_id in token_ids]
+        text = "".join(tokens).replace('\u0120', ' ')
+        return text
+        
 
     def save(self, filepath):
-        raise NotImplementedError("Save method not implemented yet.")
+        state = {
+            "vocab_size": self.vocab_size,
+            "special_tokens": self.special_tokens,
+            "token_to_id": self.token_to_id,
+            "merged_tokens": self.merged_tokens,     
+            "merged_tokens_rank": self.merged_tokens_rank
+        }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=4)
 
     def load(self, filepath):
-        raise NotImplementedError("Load method not implemented yet.")
-    
+        with open(filepath, 'r', encoding='utf-8') as f:
+            state = json.load(f)
+
+        self.vocab_size = state["vocab_size"]
+        self.special_tokens = state["special_tokens"]
+        self.token_to_id = state["token_to_id"]
+        self.merged_tokens_rank = state["merged_tokens_rank"]
+        
+        #handling json messup as keys are always strings adn no tuples
+        self.id_to_token = {int(v): k for k, v in self.token_to_id.items()}
+        self.merged_tokens = {k: tuple(v) for k, v in state["merged_tokens"].items()}
     def get_vocab_size(self):
-        raise NotImplementedError("Get vocab size method not implemented yet.")
+        return len(self.token_to_id)
     
     def get_unk_id(self):
-        raise NotImplementedError("Get unk id method not implemented yet.")
+        return self.token_to_id['<UNK>']
