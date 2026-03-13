@@ -1,20 +1,38 @@
 import json
 import re
 class BPETokenizer:
-    def __init__(self, vocab_size, special_tokens=None):
+    def __init__(self, vocab_size=None, special_tokens=None):
         self.special_tokens = ['<PAD>','<UNK>','<SOS>','<EOS>'] if special_tokens is None else special_tokens
-        self.vocab_size = vocab_size
+        self.vocab_size = vocab_size if vocab_size is not None else 1000
         self.token_to_id = {}
         self.id_to_token = {}
         self.merged_tokens = {}
         self.merged_tokens_rank = {}
         
-
+    def _pretokenize(self, text):
+        raw_tokens = re.findall(r'\s|[^\s]+', text)
+        tokens = []
+        pending_spaces = 0
+        
+        for token in raw_tokens:
+            if token == " ":
+                pending_spaces += 1
+                continue
+            if pending_spaces:
+                token = ('\u0120' * pending_spaces) + token
+                pending_spaces = 0
+            tokens.append(token)
+            
+        if pending_spaces:
+            tokens.append('\u0120' * pending_spaces)
+            
+        return tokens
+    
     def train(self, corpus):
         #1 create vocab from corpus
         vocab_word_freq = {}
         for text in corpus:
-            tokens = re.findall(r'\w+|[^\w\s]|\s', text)
+            tokens = self._pretokenize(text)
             for word_punc in tokens:
                 if word_punc == ' ':
                     word_punc = '\u0120'
@@ -90,7 +108,7 @@ class BPETokenizer:
         
     
     def encode(self, text):
-        words = re.findall(r'\w+|[^\w\s]|\s', text)
+        words = self._pretokenize(text)
         token_ids = []
         word_to_word_split = {}
         for word in words:
@@ -107,7 +125,7 @@ class BPETokenizer:
                 for i in range(len(char_list)-1):
                     pair = (char_list[i], char_list[i+1])
                     pair_str = ''.join(pair)
-                    if pair in self.merged_tokens:
+                    if pair_str in self.merged_tokens:
                         available_pairs[self.merged_tokens_rank[pair_str]] = pair
                 if available_pairs!={}:
                     best_pair = available_pairs[min(available_pairs.keys())]

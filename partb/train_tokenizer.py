@@ -22,7 +22,14 @@ def main(args):
     en = time.time()
 
     print(f"Training completed in {en - st:.2f} seconds.")
-    os.makedirs(args.output_tokenizer_path, exist_ok=True)
+    # 1. Extract just the folder path (e.g., "./partb/final_tokenizer")
+    output_dir = os.path.dirname(args.output_tokenizer_path)
+    
+    # 2. Safely create only the folder (if a folder path actually exists)
+    if output_dir:  
+        os.makedirs(output_dir, exist_ok=True)
+
+    # 3. Now save the file!
     tokenizer.save(args.output_tokenizer_path)
 
     print(f"Sentence: {corpus[0]}")
