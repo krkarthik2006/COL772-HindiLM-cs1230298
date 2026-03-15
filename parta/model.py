@@ -4,6 +4,32 @@ import torch.nn as nn
 from typing import Any, Dict, List
 from torch.nn.utils.rnn import pad_sequence
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        x_norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return self.weight * x_norm
+    
+def precompute_rope_angles(dim: int, seq_len: int, device: torch.device, base: int = 10000):
+    """Precomputes the cosine and sine matrices for Rotary Positional Embeddings."""
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device).float() / dim))
+    t = torch.arange(seq_len, device=device).float()
+    freqs = torch.einsum('i,j->ij', t, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    return torch.cos(emb), torch.sin(emb)
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Applies RoPE to a tensor of shape (B, seq_len, n_heads, d_head)."""
+    cos = cos.unsqueeze(0).unsqueeze(2)  # (1, seq_len, 1, d_head)
+    sin = sin.unsqueeze(0).unsqueeze(2)  # (1, seq_len, 1, d_head)
+    
+    d = x.shape[-1]
+    x_rot = torch.cat([-x[..., d//2:], x[..., :d//2]], dim=-1)
+    return x * cos + x_rot * sin
 class multi_head_attention(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
@@ -16,16 +42,20 @@ class multi_head_attention(nn.Module):
         self.W_k = nn.Linear(self.d_model, self.d_model, bias=False)
         self.W_v = nn.Linear(self.d_model, self.d_model, bias=False)
         self.W_o = nn.Linear(self.d_model , self.d_model,bias=False)
+        
+        self.attn_dropout = nn.Dropout(config.get('attention_dropout', 0.1))
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor,cos : torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         head_outputs = []
         B, seq_len, _ = x.size()
         #print(x.shape)
-        query_matrix = self.W_q(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        query_matrix = self.W_q(x).view(B, seq_len, self.n_heads, self.d_head)
         #print(query_matrix.shape)
-        key_matrix = self.W_k(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        key_matrix = self.W_k(x).view(B, seq_len, self.n_heads, self.d_head)
         value_matrix = self.W_v(x).view(B, seq_len, self.n_heads, self.d_head).transpose(1, 2)
 
+        query_matrix = apply_rope(query_matrix, cos, sin).transpose(1, 2)
+        key_matrix = apply_rope(key_matrix, cos, sin).transpose(1, 2)
         S = torch.matmul(query_matrix , key_matrix.transpose(-2, -1))/ math.sqrt(self.d_head)
         if (self.config['mode']== "tanh-clipped"):
             S= self.config["tau"]*torch.tanh(S)
@@ -39,6 +69,7 @@ class multi_head_attention(nn.Module):
         S = S.masked_fill(pad_mask, float('-inf'))
         
         Attention = nn.Softmax(dim=-1)(S)
+        Attention = self.attn_dropout(Attention)
         head_outputs = torch.matmul(Attention, value_matrix)
         
         head_outputs = head_outputs.transpose(1, 2).contiguous().view(B, seq_len, self.d_model)
@@ -51,17 +82,19 @@ class transformer_block(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.layer_norm1 = nn.LayerNorm(config['d_model'],elementwise_affine=True)
-        self.layer_norm2 = nn.LayerNorm(config['d_model'],elementwise_affine=True)
+        self.layer_norm1 = RMSNorm(config['d_model'])
+        self.layer_norm2 = RMSNorm(config['d_model'])
         self.up_proj = nn.Linear(config['d_model'], 4*config['d_model'])
         self.down_proj = nn.Linear(4*config['d_model'], config['d_model'])
         self.gelu = nn.GELU()
+        
+        self.dropout = nn.Dropout(config.get('dropout', 0.1))
         self.multi_head_attention = multi_head_attention(config)
     
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor,cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         org_x = x
         x = self.layer_norm1(x)
-        x = self.multi_head_attention(x, attention_mask)
+        x = self.multi_head_attention(x, attention_mask, cos, sin)
         x = x + org_x
         org_x = x
         x = self.layer_norm2(x)
@@ -82,9 +115,13 @@ class LanguageModel(nn.Module):
         super().__init__()
         d_model = config['d_model']
         self.input_embeddings = nn.Embedding(num_embeddings=self.config['vocab_size'], embedding_dim=self.config['d_model'])
+        self.embedding_dropout = nn.Dropout(config.get('dropout', 0.1))
         self.transformer_blocks = nn.ModuleList([transformer_block(config, i) for i in range(config['n_layers'])])
+        self.layer_norm_final = RMSNorm(d_model)
         self.lm_head = nn.Linear(d_model, config['vocab_size'], bias=False)
-        self.layer_norm_final = nn.LayerNorm(d_model, elementwise_affine=True)
+        
+        if not config.get('no_tie_embeddings', False):
+            self.lm_head.weight = self.input_embeddings.weight
         self.probabilites = None
 
     def positional_encoding(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -117,18 +154,19 @@ class LanguageModel(nn.Module):
         """
         with torch.no_grad():
             self.input_embeddings.weight.copy_(weights['W_vocab'].T)
-            self.lm_head.weight.copy_(weights["W_devocab"].T)
+            if not getattr(self.lm_head.weight, "data_ptr") == getattr(self.input_embeddings.weight, "data_ptr"):
+                self.lm_head.weight.copy_(weights["W_devocab"].T)
             
             self.layer_norm_final.weight.copy_(weights['gamma_final'])
-            self.layer_norm_final.bias.copy_(weights['beta_final'])
+            # self.layer_norm_final.bias.copy_(weights['beta_final'])
         
         for i,block in enumerate(self.transformer_blocks):
             layer = i+1
             with torch.no_grad():
                 block.layer_norm1.weight.copy_(weights[f'gamma_{layer}_1'])
-                block.layer_norm1.bias.copy_(weights[f'beta_{layer}_1'])
+                # block.layer_norm1.bias.copy_(weights[f'beta_{layer}_1'])
                 block.layer_norm2.weight.copy_(weights[f'gamma_{layer}_2'])
-                block.layer_norm2.bias.copy_(weights[f'beta_{layer}_2'])
+                # block.layer_norm2.bias.copy_(weights[f'beta_{layer}_2'])
 
                 block.up_proj.weight.copy_(weights[f'W_{layer}_up'].T)
                 
@@ -165,12 +203,15 @@ class LanguageModel(nn.Module):
             - A tensor of shape (batch_size, sequence_len, vocab_size) containing the logits for each token in the vocabulary.
             Logits are the raw, unnormalized scores output by the model, which can be converted to probabilities using a softmax function.
         """
+        seq_len = input_ids.size(1)
         #1 input encoding- in init
         #2 positional encoding
-        encodings = self.input_embeddings(input_ids) + self.positional_encoding(input_ids)
+        encodings = self.input_embeddings(input_ids) 
+        encodings = self.embedding_dropout(encodings)
+        cos, sin = precompute_rope_angles(self.config['d_model'] // self.config['n_heads'], seq_len, input_ids.device)
         #3 transformer blocks
         for block in self.transformer_blocks:
-            encodings = block(encodings, attention_mask)
+            encodings = block(encodings, attention_mask, cos, sin)
         #4 final norm
         encodings = self.layer_norm_final(encodings)
         #5 projection to vocab size
