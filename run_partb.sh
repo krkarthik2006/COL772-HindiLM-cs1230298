@@ -5,4 +5,4 @@
 # You are free to choose default vocab size in the train_tokenizer.py script.
 
 python -m partb.train_tokenizer --input_corpus_path ./data/tokenizer_corpus.txt \
-    --output_tokenizer_path ./partb/final_tokenizer/my_bpe.json --vocab_size 1000
+    --output_tokenizer_path ./partb/final_tokenizer/

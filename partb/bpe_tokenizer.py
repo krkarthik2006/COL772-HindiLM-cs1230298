@@ -1,4 +1,5 @@
 import json
+import os
 import re
 class BPETokenizer:
     def __init__(self, vocab_size=None,min_freq=2, special_tokens=None):
@@ -183,7 +184,7 @@ class BPETokenizer:
         return text
         
 
-    def save(self, filepath):
+    def save(self, dirpath):
         state = {
             "vocab_size": self.vocab_size,
             "special_tokens": self.special_tokens,
@@ -191,10 +192,13 @@ class BPETokenizer:
             "merged_tokens": self.merged_tokens,     
             "merged_tokens_rank": self.merged_tokens_rank
         }
+        filepath = os.path.join(dirpath, "bpe.json")
+
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=4)
 
-    def load(self, filepath):
+    def load(self, dirpath):
+        filepath = os.path.join(dirpath, "bpe.json")
         with open(filepath, 'r', encoding='utf-8') as f:
             state = json.load(f)
 
