@@ -16,7 +16,7 @@ def main(args):
                 corpus.append(line.strip())
 
     print(f"Loaded {len(corpus)} sentences from the dataset.")
-    tokenizer = BPETokenizer(args.vocab_size)
+    tokenizer = BPETokenizer(args.vocab_size, args.min_freq)
     st = time.time()
     tokenizer.train(corpus)
     en = time.time()
@@ -43,7 +43,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train a BPE tokenizer on the provided dataset')
     parser.add_argument('--input_corpus_path', type=str, required=True, help='Path to the input corpus text file')
     parser.add_argument('--train_path', type=str, default=None, required=False, help='Path to the training data text file. Only used in Part C of the assignment.')
-    parser.add_argument('--vocab_size', type=int, default=1000, help='Vocabulary size for the BPE tokenizer')
+    parser.add_argument('--vocab_size', type=int, default=50000, help='Vocabulary size for the BPE tokenizer')
+    parser.add_argument('--min_freq', type=int, default=5, help='Minimum frequency threshold to stop merging and prevent long-tail bloating')
     parser.add_argument('--output_tokenizer_path', type=str, required=True, help='Path to save the trained tokenizer')
     args = parser.parse_args()
 

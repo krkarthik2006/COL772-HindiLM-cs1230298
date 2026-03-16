@@ -1,9 +1,10 @@
 import json
 import re
 class BPETokenizer:
-    def __init__(self, vocab_size=None, special_tokens=None):
+    def __init__(self, vocab_size=None,min_freq=2, special_tokens=None):
         self.special_tokens = ['<PAD>','<UNK>','<SOS>','<EOS>'] if special_tokens is None else special_tokens
         self.vocab_size = vocab_size if vocab_size is not None else 1000
+        self.min_freq = min_freq
         self.token_to_id = {}
         self.id_to_token = {}
         self.merged_tokens = {}
@@ -56,21 +57,31 @@ class BPETokenizer:
         word_split = {word: list(word) for word in vocab_word_freq.keys()}
         #4 freq for bpe
         vocab_token_freq = {}
+        pair_to_words = {}
         for word, freq in vocab_word_freq.items():
             tokens = list(word)
             for i in range(len(tokens)-1):
                 pair = (tokens[i], tokens[i+1])
-                if pair not in vocab_token_freq:
-                    vocab_token_freq[pair] = 0
-                vocab_token_freq[pair] += freq
+                vocab_token_freq[pair] = vocab_token_freq.get(pair, 0) + freq
+                
+                if pair not in pair_to_words:
+                    pair_to_words[pair] = set()
+                pair_to_words[pair].add(word)
         
         #5 bpe merge
         rank = 0
         while (len(self.token_to_id) < self.vocab_size):
             if not vocab_token_freq:
+                print(f"Early termination: No more pairs to merge. Final vocab size: {len(self.token_to_id)}")
                 break
+            
             # find the most frequent pair breaking ties by lexicographical order
             most_freq_pair = min(vocab_token_freq, key=lambda x: (-vocab_token_freq[x], x))
+            max_freq = vocab_token_freq[most_freq_pair]
+            
+            if max_freq < self.min_freq:
+                print(f"Early termination: Highest pair frequency ({max_freq}) dropped below threshold ({self.min_freq}). Final vocab size: {len(self.token_to_id)}")
+                break
             new_token = ''.join(most_freq_pair)
             self.token_to_id[new_token] = index
             self.id_to_token[index] = new_token
@@ -78,32 +89,43 @@ class BPETokenizer:
             self.merged_tokens[new_token] = most_freq_pair
             self.merged_tokens_rank[new_token] = rank
             rank += 1
+            
+            words_to_update = pair_to_words.get(most_freq_pair, set()).copy()
+            if most_freq_pair in vocab_token_freq:
+                del vocab_token_freq[most_freq_pair]
+            if most_freq_pair in pair_to_words:
+                del pair_to_words[most_freq_pair]
             #update word_split and vocab_token_freq
-            for word, tokens in word_split.items():
+            for word in words_to_update:
+                freq = vocab_word_freq[word]
+                old_tokens = word_split[word]
+                for i in range(len(old_tokens)-1):
+                    pair = (old_tokens[i], old_tokens[i+1])
+                    if pair != most_freq_pair and pair in vocab_token_freq:
+                        vocab_token_freq[pair] -= freq
+                        if vocab_token_freq[pair] <= 0:
+                            del vocab_token_freq[pair]
+                            if pair in pair_to_words and word in pair_to_words[pair]:
+                                pair_to_words[pair].remove(word)
+                
                 i = 0
-                new_tokens=[]
-                while i < len(tokens):
-                    if i < len(tokens) - 1:
-                        pair = (tokens[i], tokens[i+1])
-                        if pair == most_freq_pair:
-                            new_tokens.append(new_token)
-                            i += 2
-                        else:
-                            new_tokens.append(tokens[i])
-                            i += 1
+                new_tokens = []
+                while i < len(old_tokens):
+                    if i < len(old_tokens) - 1 and (old_tokens[i], old_tokens[i+1]) == most_freq_pair:
+                        new_tokens.append(new_token)
+                        i += 2
                     else:
-                        new_tokens.append(tokens[i])
+                        new_tokens.append(old_tokens[i])
                         i += 1
                 word_split[word] = new_tokens
-            
-            vocab_token_freq = {}
-            for word, freq in vocab_word_freq.items():
-                tokens = word_split[word]
-                for i in range(len(tokens)-1):
-                    pair = (tokens[i], tokens[i+1])
-                    if pair not in vocab_token_freq:
-                        vocab_token_freq[pair] = 0
-                    vocab_token_freq[pair] += freq
+                
+      
+                for i in range(len(new_tokens)-1):
+                    pair = (new_tokens[i], new_tokens[i+1])
+                    vocab_token_freq[pair] = vocab_token_freq.get(pair, 0) + freq
+                    if pair not in pair_to_words:
+                        pair_to_words[pair] = set()
+                    pair_to_words[pair].add(word)
             
         
     
