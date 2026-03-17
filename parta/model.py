@@ -95,12 +95,14 @@ class transformer_block(nn.Module):
         org_x = x
         x = self.layer_norm1(x)
         x = self.multi_head_attention(x, attention_mask, cos, sin)
+        x= self.dropout(x)
         x = x + org_x
         org_x = x
         x = self.layer_norm2(x)
         x = self.up_proj(x)
         x = self.gelu(x)
         x = self.down_proj(x)
+        x = self.dropout(x)
         x = x + org_x
         return x
         
