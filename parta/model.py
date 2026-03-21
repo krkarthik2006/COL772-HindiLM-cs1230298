@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from torch.nn.utils.rnn import pad_sequence
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
@@ -13,6 +13,18 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         x_norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return self.weight * x_norm
+    
+class SwiGLUFeedForward(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        hidden_dim = int(8 * d_model / 3) 
+        self.w12 = nn.Linear(d_model, 2 * hidden_dim, bias=False) 
+        self.w3 = nn.Linear(hidden_dim, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = self.w12(x).chunk(2, dim=-1)
+        return self.w3(nn.functional.silu(x1) * x2)
+    
     
 def precompute_rope_angles(dim: int, seq_len: int, device: torch.device, base: int = 10000):
     """Precomputes the cosine and sine matrices for Rotary Positional Embeddings."""
@@ -84,9 +96,7 @@ class transformer_block(nn.Module):
         self.layer_idx = layer_idx
         self.layer_norm1 = RMSNorm(config['d_model'])
         self.layer_norm2 = RMSNorm(config['d_model'])
-        self.up_proj = nn.Linear(config['d_model'], 4*config['d_model'])
-        self.down_proj = nn.Linear(4*config['d_model'], config['d_model'])
-        self.gelu = nn.GELU()
+        self.feed_forward = SwiGLUFeedForward(config['d_model'])
         
         self.dropout = nn.Dropout(config.get('dropout', 0.1))
         self.multi_head_attention = multi_head_attention(config)
@@ -99,9 +109,7 @@ class transformer_block(nn.Module):
         x = x + org_x
         org_x = x
         x = self.layer_norm2(x)
-        x = self.up_proj(x)
-        x = self.gelu(x)
-        x = self.down_proj(x)
+        x = self.feed_forward(x)
         x = self.dropout(x)
         x = x + org_x
         return x
@@ -109,6 +117,14 @@ class transformer_block(nn.Module):
 
 class LanguageModel(nn.Module):
     
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                
     def __init__(self, config: Dict[str, Any]):
         """
         Build the LanguageModel based on the config.
@@ -125,7 +141,10 @@ class LanguageModel(nn.Module):
         if not config.get('no_tie_embeddings', False):
             self.lm_head.weight = self.input_embeddings.weight
         self.probabilites = None
+        self.apply(self._init_weights)
+        
 
+            
     def positional_encoding(self, input_ids: torch.Tensor) -> torch.Tensor:
         seq_len = input_ids.size(1)
         d_model = self.config['d_model']
@@ -170,11 +189,11 @@ class LanguageModel(nn.Module):
                 block.layer_norm2.weight.copy_(weights[f'gamma_{layer}_2'])
                 # block.layer_norm2.bias.copy_(weights[f'beta_{layer}_2'])
 
-                block.up_proj.weight.copy_(weights[f'W_{layer}_up'].T)
+                # block.up_proj.weight.copy_(weights[f'W_{layer}_up'].T)
                 
-                block.up_proj.bias.copy_(weights[f'b_{layer}_up'])
-                block.down_proj.weight.copy_(weights[f'W_{layer}_down'].T)
-                block.down_proj.bias.copy_(weights[f'b_{layer}_down'])
+                # block.up_proj.bias.copy_(weights[f'b_{layer}_up'])
+                # block.down_proj.weight.copy_(weights[f'W_{layer}_down'].T)
+                # block.down_proj.bias.copy_(weights[f'b_{layer}_down'])
 
             W_q_list = []
             W_v_list = []

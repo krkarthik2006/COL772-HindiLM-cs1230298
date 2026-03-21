@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from partb.bpe_tokenizer import BPETokenizer
 from parta.model import LanguageModel, collate_fn
 from torch.utils.data import Dataset, DataLoader
-from .utils import calculate_perplexity, calculate_bpc
+from .utils import calculate_bpc
 
 
 def collate_batch_for_lm(batch):
@@ -26,7 +26,7 @@ def build_scheduler(optimizer, num_warmup_steps, num_training_steps):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        return max(0.1, 0.5 * (1.0 + math.cos(math.pi * progress)))
     return LambdaLR(optimizer, lr_lambda)
 
 
@@ -72,7 +72,18 @@ class dataset(Dataset):
 def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
-    
+    # if device.type == 'cuda' and torch.cuda.is_bf16_supported():
+    #     ptdtype = torch.bfloat16
+    #     print("AMP: Using native Bfloat16 (CUDA)")
+    # elif device.type == 'cpu':
+    #     ptdtype = torch.bfloat16 
+    #     print("AMP: Using simulated Bfloat16 (CPU)")
+    # else:
+    #     ptdtype = torch.float16 
+    #     print("AMP: Using standard Float16 (MPS/Fallback)")
+        
+    # use_scaler = (ptdtype == torch.float16)
+    # scaler = torch.amp.GradScaler(enabled=use_scaler)
     # load tokenizer
     tokenizer = BPETokenizer()
     tokenizer_path = args.tokenizer_path
@@ -111,7 +122,7 @@ def main(args):
     
     model = LanguageModel(config).to(device)
     
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=0, label_smoothing=0.05) 
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=0) 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     accumulation_steps = 4
     total_steps = (len(train_dataloader) // accumulation_steps) * args.epochs
@@ -155,6 +166,7 @@ def main(args):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             
+            # with torch.autocast(device_type=device.type, dtype=ptdtype):
             logits = model(input_ids, attention_mask)
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = input_ids[:, 1:].contiguous()
@@ -162,12 +174,14 @@ def main(args):
             loss = criterion(shift_logits.view(-1, config['vocab_size']), shift_labels.view(-1))
             loss = loss / accumulated_steps
             loss.backward()
-            
+            if step % 10 == 0:
+                print(f"Step {step} | Loss: {loss.item() * accumulation_steps:.4f}")
             if (step + 1) % accumulated_steps == 0 or (step + 1) == len(train_dataloader):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)#to 0.5?
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad() 
+                
             
             total_loss += (loss.item() * accumulated_steps)
             
@@ -187,12 +201,12 @@ def main(args):
                 total_valid_loss += loss.item()
                 
         avg_valid_loss = total_valid_loss / len(valid_dataloader)
-        valid_perplexity = calculate_perplexity(avg_valid_loss)
+        
         
         valid_bpc = calculate_bpc(avg_valid_loss, total_valid_tokens, total_valid_chars)
         print(
             f"Epoch {epoch+1}/{args.epochs} - Train Loss: {avg_train_loss:.4f} "
-            f"- Valid Loss: {avg_valid_loss:.4f} - Valid PPL: {valid_perplexity:.4f}"
+            f"- Valid Loss: {avg_valid_loss:.4f}"
             f" - Valid BPC: {valid_bpc:.4f}"
         )
         
@@ -224,19 +238,19 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer_path', type=str, required=True, help='Path to the tokenizer')
     parser.add_argument('--output_model_path', type=str, default='checkpoints', help='Directory to save checkpoints')
     
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=15, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--warmup_steps', type=int, default=1000, help='Steps for learning rate warmup')
     
     parser.add_argument('--max_seq_len', type=int, default=512, help='Maximum context window')
-    parser.add_argument('--d_model', type=int, default=384, help='Dimension of the model')
-    parser.add_argument('--n_heads', type=int, default=6, help='Number of attention heads')
-    parser.add_argument('--n_layers', type=int, default=8, help='Number of transformer layers')
+    parser.add_argument('--d_model', type=int, default=768, help='Dimension of the model')
+    parser.add_argument('--n_heads', type=int, default=12, help='Number of attention heads')
+    parser.add_argument('--n_layers', type=int, default=12, help='Number of transformer layers')
     
-    parser.add_argument('--dropout', type=float, default=0.1, help='General Dropout probability')
-    parser.add_argument('--attention_dropout', type=float, default=0.1, help='Attention Dropout probability')
+    parser.add_argument('--dropout', type=float, default=0.15, help='General Dropout probability')
+    parser.add_argument('--attention_dropout', type=float, default=0.15, help='Attention Dropout probability')
 
     parser.add_argument('--save_intermediate', action='store_true', help='Flag to save intermediate optimizer/model states')
     parser.add_argument('--resume_from', type=str, default=None, help='Path to a checkpoint (.pt) to resume training from')
