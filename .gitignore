@@ -208,3 +208,5 @@ __marimo__/
 *.pth
 *.DS_Store
 *.zip
+*.pt
+*.txt
