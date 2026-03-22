@@ -58,7 +58,7 @@ if __name__ == "__main__":
     parser.add_argument('--tokenizer_path', type=str, required=True, help='Path to the tokenizer checkpoint directory')
     args = parser.parse_args()
 
-    model, tokenizer = load_model_and_tokenizer(args.model_path, args.model_path)
+    model, tokenizer = load_model_and_tokenizer(args.model_path, args.tokenizer_path)
 
     # Example texts to check format
     texts = [
