@@ -1,6 +1,10 @@
-from partb.bpe_tokenizer import BPETokenizer
-from parta.model import LanguageModel, collate_fn
+import os
+import re
+
 import torch
+
+from parta.model import LanguageModel, collate_fn
+from partb.bpe_tokenizer import BPETokenizer
 
 print("This script checks whether your model and tokenizer are compatible with the expected format for the assignment.")
 print("Make sure to implement the load_model_and_tokenizer function to load your trained model and tokenizer from the checkpoint directory, and ensure that your model and tokenizer are compatible with the check_format function.")
@@ -9,7 +13,46 @@ def load_model_and_tokenizer(model_path, tokenizer_path):
     """
     CHANGE THIS FUNCTION TO LOAD YOUR TRAINED MODEL AND TOKENIZER FROM THE CHECKPOINT DIRECTORY.
     """
-    raise NotImplementedError("You need to implement the load_model_and_tokenizer function to load your trained model and tokenizer from the checkpoint directory.")
+    tokenizer = BPETokenizer()
+    tokenizer.load(tokenizer_path)
+
+    checkpoint = torch.load(model_path, map_location="cpu")
+    state_dict = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else checkpoint
+
+    # Infer architecture where possible and keep the remaining values aligned
+    # with defaults used in partc/train_model.py.
+    d_model = state_dict["input_embeddings.weight"].shape[1]
+    n_layers = len(
+        {
+            int(match.group(1))
+            for key in state_dict
+            if (match := re.match(r"transformer_blocks\.(\d+)\.", key))
+        }
+    )
+
+    model_vocab_size = state_dict["input_embeddings.weight"].shape[0]
+    tokenizer_vocab_size = tokenizer.get_vocab_size()
+    if model_vocab_size != tokenizer_vocab_size:
+        raise ValueError(
+            f"Vocab mismatch: model expects {model_vocab_size} tokens, "
+            f"but tokenizer has {tokenizer_vocab_size}. "
+            "Please load the tokenizer used during model training."
+        )
+
+    config = {
+        "d_model": d_model,
+        "n_heads": 12 ,  # Assuming head size of 64 as in partc/train_model.py
+        "n_layers": n_layers,
+        "vocab_size": tokenizer_vocab_size,
+        "dropout": 0.15,
+        "attention_dropout": 0.15,
+        "mode": "standard",
+        "no_tie_embeddings": True,
+    }
+
+    model = LanguageModel(config)
+    model.load_state_dict(state_dict)
+    return model, tokenizer
 
 
 def check_format(model, tokenizer, texts):

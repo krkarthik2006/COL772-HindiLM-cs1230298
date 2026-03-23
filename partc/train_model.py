@@ -63,7 +63,7 @@ class dataset(Dataset):
         text = self.data[idx]
         token_ids = self.tokenizer.encode(text)
         if len(token_ids) > self.max_length:
-            token_ids = token_ids[:self.max_length]
+            token_ids = token_ids[-self.max_length:]            
         return {
             "input_ids": torch.tensor(token_ids, dtype=torch.long),
             "attention_mask": torch.ones(len(token_ids), dtype=torch.long)
@@ -72,18 +72,7 @@ class dataset(Dataset):
 def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
-    # if device.type == 'cuda' and torch.cuda.is_bf16_supported():
-    #     ptdtype = torch.bfloat16
-    #     print("AMP: Using native Bfloat16 (CUDA)")
-    # elif device.type == 'cpu':
-    #     ptdtype = torch.bfloat16 
-    #     print("AMP: Using simulated Bfloat16 (CPU)")
-    # else:
-    #     ptdtype = torch.float16 
-    #     print("AMP: Using standard Float16 (MPS/Fallback)")
         
-    # use_scaler = (ptdtype == torch.float16)
-    # scaler = torch.amp.GradScaler(enabled=use_scaler)
     # load tokenizer
     tokenizer = BPETokenizer()
     tokenizer_path = args.tokenizer_path
@@ -102,11 +91,11 @@ def main(args):
             
     train_dataset = dataset(train_data, tokenizer, max_length=args.max_seq_len)
     valid_dataset = dataset(valid_data, tokenizer, max_length=args.max_seq_len)
-    print("Calculating validation character-to-token ratio for BPC...")
+    
+    print("Calculating validation characters for BPC...")
     total_valid_chars = sum(len(text) for text in valid_data)
-    # Count tokens, capping at max_seq_len just like the dataset class does
-    total_valid_tokens = sum(min(len(tokenizer.encode(text)), args.max_seq_len) for text in valid_data)
-    print(f"Valid set has {total_valid_chars} chars and {total_valid_tokens} tokens.")
+    print(f"Valid set has {total_valid_chars} chars.")
+    
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_batch_for_lm)
     valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch_for_lm)
     
@@ -117,14 +106,16 @@ def main(args):
         "vocab_size": tokenizer.get_vocab_size(),
         "dropout": args.dropout,
         "attention_dropout": args.attention_dropout,
-        "mode": "standard"
+        "mode": "standard",
+        "no_tie_embeddings": True 
     }
     
     model = LanguageModel(config).to(device)
     
     criterion = torch.nn.CrossEntropyLoss(ignore_index=0) 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    accumulation_steps = 4
+
+    accumulation_steps = 8
     total_steps = (len(train_dataloader) // accumulation_steps) * args.epochs
     scheduler = build_scheduler(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=total_steps)
     
@@ -155,40 +146,50 @@ def main(args):
         print(f"Checkpoint is already at/after target epochs ({args.epochs}). Nothing to train.")
         return
     
+    max_train_seconds = int(args.max_train_hours * 3600)
+    train_start_time = time()
     print("Starting training...")
-    accumulated_steps = 4
+    print(f"Max training time: {args.max_train_hours:.2f}h ({max_train_seconds}s)")
+    epochs_no_improve = 0
+    timed_out = False
     for epoch in range(start_epoch, args.epochs):
         model.train()
-        total_loss = 0
+        total_train_loss = 0
         optimizer.zero_grad()
-        for (step,batch) in enumerate(train_dataloader):
-            
+        
+        for (step, batch) in enumerate(train_dataloader):
+            if time() - train_start_time >= max_train_seconds:
+                timed_out = True
+                print("Reached training time limit. Stopping and using saved best model.")
+                break
+
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             
-            # with torch.autocast(device_type=device.type, dtype=ptdtype):
             logits = model(input_ids, attention_mask)
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = input_ids[:, 1:].contiguous()
             
             loss = criterion(shift_logits.view(-1, config['vocab_size']), shift_labels.view(-1))
-            loss = loss / accumulated_steps
+            loss = loss / accumulation_steps
             loss.backward()
-            if step % 10 == 0:
-                print(f"Step {step} | Loss: {loss.item() * accumulation_steps:.4f}")
-            if (step + 1) % accumulated_steps == 0 or (step + 1) == len(train_dataloader):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)#to 0.5?
+                
+            if (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dataloader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad() 
                 
+            total_train_loss += (loss.item() * accumulation_steps)
+
+        if timed_out:
+            break
             
-            total_loss += (loss.item() * accumulated_steps)
-            
-        avg_train_loss = total_loss / len(train_dataloader)
+        avg_train_loss = total_train_loss / len(train_dataloader)
         
         model.eval()
-        total_valid_loss = 0
+        total_valid_loss_sum = 0.0 # To store the exact sum of losses
+        total_valid_tokens = 0
         with torch.no_grad():
             for batch in valid_dataloader:
                 input_ids = batch['input_ids'].to(device)
@@ -198,36 +199,59 @@ def main(args):
                 shift_logits = logits[:, :-1, :].contiguous()
                 shift_labels = input_ids[:, 1:].contiguous()
                 loss = criterion(shift_logits.view(-1, config['vocab_size']), shift_labels.view(-1))
-                total_valid_loss += loss.item()
+                valid_tokens_in_batch = (shift_labels != 0).sum().item()
                 
-        avg_valid_loss = total_valid_loss / len(valid_dataloader)
+                total_valid_loss_sum += loss.item() * valid_tokens_in_batch
+                total_valid_tokens += valid_tokens_in_batch
+        avg_valid_loss = total_valid_loss_sum / total_valid_tokens
+        valid_bpc = (total_valid_loss_sum / math.log(2)) / total_valid_chars
         
-        
-        valid_bpc = calculate_bpc(avg_valid_loss, total_valid_tokens, total_valid_chars)
+    
         print(
             f"Epoch {epoch+1}/{args.epochs} - Train Loss: {avg_train_loss:.4f} "
             f"- Valid Loss: {avg_valid_loss:.4f}"
             f" - Valid BPC: {valid_bpc:.4f}"
         )
         
-        if args.save_intermediate:
-            checkpoint_path = os.path.join(args.output_model_path, f"checkpoint_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_valid_loss': best_valid_loss,
-                'loss': avg_valid_loss,
-            }, checkpoint_path)
-            print(f"Saved intermediate checkpoint to {checkpoint_path}")
+        # if args.save_intermediate:
+        #     checkpoint_path = os.path.join(args.output_model_path, f"checkpoint_epoch_{epoch+1}.pt")
+        #     torch.save({
+        #         'epoch': epoch,
+        #         'model_state_dict': model.state_dict(),
+        #         'optimizer_state_dict': optimizer.state_dict(),
+        #         'scheduler_state_dict': scheduler.state_dict(),
+        #         'best_valid_loss': best_valid_loss,
+        #         'loss': avg_valid_loss,
+        #     }, checkpoint_path)
+        #     print(f"Saved intermediate checkpoint to {checkpoint_path}")
 
         if avg_valid_loss < best_valid_loss:
             best_valid_loss = avg_valid_loss
+            epochs_no_improve = 0 # Reset counter because we improved
+            
             best_model_path = os.path.join(args.output_model_path, "best_model.pt")
             torch.save(model.state_dict(), best_model_path)
             print(f"--> Saved new best model to {best_model_path}")
+        else:
+            epochs_no_improve += 1
+            print(f"Validation loss did not improve. Patience: {epochs_no_improve}/{args.patience}")
+            
+            if epochs_no_improve >= args.patience:
+                print("Early stopping triggered! Training halted to prevent overfitting.")
+                break # Exit the training loop early
 
+    if timed_out:
+        print("Training halted due to wall-clock timeout.")
+
+    print("Training process finished.")
+    best_model_path = os.path.join(args.output_model_path, "best_model.pt")
+    if os.path.exists(best_model_path):
+        print(f"Best model saved at: {best_model_path}")
+        print("Loading best model weights into memory...")
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+    else:
+        print("Warning: No best model was found or saved during training.")
+        
 if __name__ == '__main__':
     import argparse
     start_time = time()
@@ -238,10 +262,10 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer_path', type=str, required=True, help='Path to the tokenizer')
     parser.add_argument('--output_model_path', type=str, default='checkpoints', help='Directory to save checkpoints')
     
-    parser.add_argument('--epochs', type=int, default=15, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=12, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
+    parser.add_argument('--lr', type=float, default=1.5e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.1, help='Weight decay')
     parser.add_argument('--warmup_steps', type=int, default=1000, help='Steps for learning rate warmup')
     
     parser.add_argument('--max_seq_len', type=int, default=512, help='Maximum context window')
@@ -255,7 +279,8 @@ if __name__ == '__main__':
     parser.add_argument('--save_intermediate', action='store_true', help='Flag to save intermediate optimizer/model states')
     parser.add_argument('--resume_from', type=str, default=None, help='Path to a checkpoint (.pt) to resume training from')
     parser.add_argument('--auto_resume', action='store_true', help='If set, resume from latest epoch checkpoint in output_model_path')
-    
+    parser.add_argument('--patience', type=int, default=3, help='Number of epochs to wait for improvement before stopping')
+    parser.add_argument('--max_train_hours', type=float, default=5.5, help='Maximum wall-clock training time in hours')
     args = parser.parse_args()
     main(args)
     
